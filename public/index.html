@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel GCM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --background: #f8fafc; --card-bg: #ffffff; --text-primary: #0f172a; --text-secondary: #475569; --border-color: #e2e8f0; --sidebar-bg: #ffffff; --accent-color: #3b82f6; --accent-text: #ffffff; }
+        html.dark { --background: #020617; --card-bg: #0f172a; --text-primary: #f8fafc; --text-secondary: #94a3b8; --border-color: #1e293b; --sidebar-bg: #0f172a; --accent-color: #60a5fa; --accent-text: #0f172a; }
+        body { font-family: 'Readex Pro', sans-serif; background-color: var(--background); color: var(--text-primary); }
+        .page-fade-in { animation: fadeIn 0.4s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .nav-link.active { background-color: var(--accent-color) !important; color: var(--accent-text) !important; font-weight: 600; }
+        .modal-backdrop { background-color: rgba(2, 6, 23, 0.7); backdrop-filter: blur(4px); }
+        input, select { color: var(--text-primary); }
+        .quick-filter-btn.active { background-color: var(--accent-color); color: var(--accent-text); }
+        .tab-btn.active { color: var(--accent-color); border-color: var(--accent-color); }
+        .heatmap-cell { transition: background-color 0.2s; }
+    </style>
+</head>
+<body class="min-h-screen antialiased">
+    <div id="app-root"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="fixed top-5 right-5 z-[100] space-y-2"></div>
+
+    <script>
+        class GcmPanelApp {
+            constructor(rootNode) {
+                this.root = rootNode;
+                this.modalRoot = document.getElementById('modal-root');
+                this.toastRoot = document.getElementById('toast-root');
+                this.state = {
+                    user: null,
+                    theme: 'dark',
+                    timers: {},
+                    charts: {},
+                    selectedReportUser: null,
+                    activeReportFilter: null,
+                    rankingFilters: {
+                        period: 'weekly',
+                        year: new Date().getFullYear(),
+                        month: new Date().getMonth(),
+                        week: this.getWeekNumber(new Date())
+                    },
+                    spreadsheetFilters: {
+                        status: '',
+                        username: ''
+                    }
+                };
+
+                this.defineApi();
+                this.defineTemplates();
+                this.init();
+            }
+
+            async init() {
+                this.state.theme = localStorage.getItem('theme') || 'dark';
+                this.updateThemeClass();
+                this.state.user = { name: 'Admin', email: 'admin@painel.com' };
+                try {
+                    await this.renderAppShell();
+                    this.checkForAlerts();
+                    this.state.timers.alerts = setInterval(() => this.checkForAlerts(), 5 * 60 * 1000);
+                } catch (error) {
+                    console.error("Erro na inicialização:", error);
+                    this.root.innerHTML = `<div class="p-4 text-red-500">Falha ao iniciar a aplicação. Verifique se a API está rodando.</div>`;
+                }
+            }
+
+            async checkForAlerts() {
+                const alertContainer = document.getElementById('alert-container');
+                if (!alertContainer) return;
+
+                const res = await this.api.getAlerts();
+                if(res.success && res.alerts.length > 0) {
+                    alertContainer.innerHTML = this.templates.alertBanner(res.alerts);
+                    alertContainer.querySelector('.close-alert-btn')?.addEventListener('click', () => alertContainer.innerHTML = '');
+                } else {
+                    alertContainer.innerHTML = '';
+                }
+            }
+
+            async renderAppShell() {
+                this.clearTimers();
+                this.root.innerHTML = this.templates.appShell(this.state.user);
+                this.setupCommonListeners();
+                await this.navigateTo(window.location.hash.substring(1) || 'dashboard');
+            }
+
+            async navigateTo(page) {
+                this.clearTimers();
+                if (!window.location.hash.includes(page)) {
+                    this.state.selectedReportUser = null;
+                }
+                const contentContainer = this.root.querySelector('#page-content');
+                if (!contentContainer) return;
+
+                window.location.hash = page;
+                this.root.querySelector('#page-title').textContent = page.charAt(0).toUpperCase() + page.slice(1);
+                this.root.querySelectorAll('#main-nav a').forEach(a => a.classList.toggle('active', a.hash === `#${page}`));
+
+                const pageRenderers = {
+                    dashboard: this.renderDashboardPage,
+                    ranking: this.renderRankingPage,
+                    reports: this.renderReportsPage,
+                    spreadsheet: this.renderSpreadsheetPage,
+                    members: this.renderMembersPage,
+                    settings: this.renderSettingsPage,
+                };
+                const renderer = pageRenderers[page] || this.renderNotFoundPage;
+
+                await renderer.call(this, contentContainer);
+            }
+
+            async renderDashboardPage(container) {
+                container.innerHTML = this.templates.loadingDashboard();
+                const summary = await this.api.getDashboardSummary();
+                if (summary && summary.success) {
+                    container.innerHTML = this.templates.dashboardPage(summary, this.formatDuration);
+                    this.renderChart('status', summary, '#status-chart');
+                    this.renderChart('activity', summary.weeklyActivity, '#activity-chart');
+                    this.renderChart('hourly', summary.hourlyActivity, '#hourly-activity-chart');
+                    this.renderActivityFeed(summary.activityFeed);
+                } else {
+                    container.innerHTML = this.templates.errorPage('Falha ao carregar dados do dashboard.');
+                }
+            }
+
+            formatDuration(ms, detailed = false) {
+                 if (isNaN(ms) || ms <= 0) return detailed ? '0h 0m' : '0m';
+                const hours = Math.floor(ms / 3600000);
+                const minutes = Math.floor((ms % 3600000) / 60000);
+                let result = '';
+                if (hours > 0) result += `${hours}h `;
+                if (minutes > 0 || detailed) result += `${minutes}m`;
+                return result.trim() || '0m';
+            }
+
+            getPeriodDescription(activeFilter, startDate, endDate) {
+                const formatDate = (dateString) => {
+                    if (!dateString) return '';
+                    const [year, month, day] = dateString.split('-');
+                    return `${day}/${month}/${year}`;
+                };
+
+                switch(activeFilter) {
+                    case 'today': return 'de Hoje';
+                    case 'week': return 'desta Semana';
+                    case 'month': return 'deste Mês';
+                    default:
+                        if (startDate && endDate) {
+                            if (startDate === endDate) return `do dia ${formatDate(startDate)}`;
+                            return `de ${formatDate(startDate)} a ${formatDate(endDate)}`;
+                        }
+                        if (startDate) return `a partir de ${formatDate(startDate)}`;
+                        if (endDate) return `até ${formatDate(endDate)}`;
+                        return 'de todo o período';
+                }
+            }
+
+            renderActivityFeed(feedItems) {
+                const feedContainer = this.root.querySelector('#activity-feed');
+                if (!feedContainer || !feedItems) return;
+                feedContainer.innerHTML = feedItems.length > 0
+                    ? feedItems.map(item => this.templates.activityFeedItem(item)).join('')
+                    : '<p class="text-sm text-text-secondary text-center py-4">Nenhuma atividade recente.</p>';
+            }
+
+            async renderRankingPage(container) {
+                container.innerHTML = this.templates.rankingPage(this.state.rankingFilters, this.getWeekNumber, this.getWeekDateRange);
+                this.updateRankingView();
+                this.setupRankingListeners();
+            }
+
+            async updateRankingView() {
+                const listContainer = this.root.querySelector('#ranking-list-container');
+                if (!listContainer) return;
+                listContainer.innerHTML = this.templates.loadingRow(3);
+
+                const params = new URLSearchParams(this.state.rankingFilters);
+                const res = await this.api.getRanking(params.toString());
+
+                if (res.success) {
+                    listContainer.innerHTML = res.ranking.length > 0
+                        ? res.ranking.map((item, index) => this.templates.rankingItem(item, index, this.formatDuration)).join('')
+                        : this.templates.emptyRow(3);
+                } else {
+                    listContainer.innerHTML = this.templates.errorPage('Falha ao carregar ranking.');
+                }
+            }
+
+            setupRankingListeners() {
+                const periodSelect = this.root.querySelector('#ranking-period-select');
+                const yearSelect = this.root.querySelector('#ranking-year-select');
+                const monthSelect = this.root.querySelector('#ranking-month-select');
+                const weekSelect = this.root.querySelector('#ranking-week-select');
+
+                const handleFilterChange = () => {
+                    this.state.rankingFilters.period = periodSelect.value;
+                    this.state.rankingFilters.year = parseInt(yearSelect.value);
+                    if (periodSelect.value === 'monthly') {
+                        this.state.rankingFilters.month = parseInt(monthSelect.value);
+                    } else {
+                        this.state.rankingFilters.week = parseInt(weekSelect.value);
+                    }
+                    this.renderRankingPage(this.root.querySelector('#page-content'));
+                };
+
+                periodSelect.addEventListener('change', handleFilterChange);
+                yearSelect.addEventListener('change', handleFilterChange);
+                monthSelect.addEventListener('change', handleFilterChange);
+                weekSelect.addEventListener('change', handleFilterChange);
+            }
+
+            async renderReportsPage(container) {
+                container.innerHTML = this.templates.loadingDashboard();
+
+                if (this.state.selectedReportUser) {
+                    await this.renderReportForUser(container, this.state.selectedReportUser);
+                } else {
+                    const usersResponse = await this.api.getUniqueUsers();
+                    if (usersResponse.success) {
+                        container.innerHTML = this.templates.reportUserListPage(usersResponse.users);
+                        container.querySelectorAll('.user-report-link').forEach(link => {
+                            link.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                const userId = e.currentTarget.dataset.userid;
+                                const username = e.currentTarget.dataset.username;
+                                this.state.selectedReportUser = { userId, username };
+                                this.renderReportsPage(container);
+                            });
+                        });
+                    } else {
+                        container.innerHTML = this.templates.errorPage('Falha ao carregar lista de usuários.');
+                    }
+                }
+            }
+
+            async renderReportForUser(container, user) {
+                container.innerHTML = this.templates.reportsPage(user, this.state.activeReportFilter);
+
+                this.setupReportListeners();
+                await this.renderReportTable(false);
+            }
+
+            setupReportListeners() {
+                this.root.querySelector('#filter-btn').addEventListener('click', () => {
+                    this.state.activeReportFilter = null;
+                    this.updateQuickFilterButtons();
+                    this.renderReportTable(false);
+                });
+                this.root.querySelector('#export-xlsx-btn').addEventListener('click', () => this.exportReport('xlsx'));
+                this.root.querySelector('#export-pdf-btn').addEventListener('click', () => this.exportReport('pdf'));
+                this.root.querySelector('#back-to-users-btn').addEventListener('click', () => {
+                    this.state.selectedReportUser = null;
+                    this.renderReportsPage(this.root.querySelector('#page-content'));
+                });
+
+                const todayBtn = this.root.querySelector('#qf-today');
+                const weekBtn = this.root.querySelector('#qf-week');
+                const monthBtn = this.root.querySelector('#qf-month');
+                const startDateInput = this.root.querySelector('#start-date-filter');
+                const endDateInput = this.root.querySelector('#end-date-filter');
+
+                const toLocalISOString = (date) => {
+                    const year = date.getFullYear();
+                    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                    const day = date.getDate().toString().padStart(2, '0');
+                    return `${year}-${month}-${day}`;
+                };
+
+                todayBtn.addEventListener('click', () => {
+                    const today = toLocalISOString(new Date());
+                    startDateInput.value = today;
+                    endDateInput.value = today;
+                    this.state.activeReportFilter = 'today';
+                    this.updateQuickFilterButtons();
+                    this.renderReportTable(false);
+                });
+
+                weekBtn.addEventListener('click', () => {
+                    const today = new Date();
+                    const dayOfWeek = today.getDay();
+                    const diffToMonday = today.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+                    const monday = new Date(today.setDate(diffToMonday));
+
+                    const sunday = new Date(monday);
+                    sunday.setDate(monday.getDate() + 6);
+
+                    startDateInput.value = toLocalISOString(monday);
+                    endDateInput.value = toLocalISOString(sunday);
+                    this.state.activeReportFilter = 'week';
+                    this.updateQuickFilterButtons();
+                    this.renderReportTable(false);
+                });
+
+                monthBtn.addEventListener('click', () => {
+                    const today = new Date();
+                    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                    const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+                    startDateInput.value = toLocalISOString(firstDay);
+                    endDateInput.value = toLocalISOString(lastDay);
+                    this.state.activeReportFilter = 'month';
+                    this.updateQuickFilterButtons();
+                    this.renderReportTable(false);
+                });
+
+                startDateInput.addEventListener('change', () => {
+                    this.state.activeReportFilter = null;
+                    this.updateQuickFilterButtons();
+                });
+                endDateInput.addEventListener('change', () => {
+                    this.state.activeReportFilter = null;
+                    this.updateQuickFilterButtons();
+                });
+            }
+
+            updateQuickFilterButtons() {
+                this.root.querySelectorAll('.quick-filter-btn').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.filter === this.state.activeReportFilter);
+                });
+            }
+
+            async renderMembersPage(container) {
+                container.innerHTML = this.templates.loadingDashboard();
+                const response = await this.api.getMembers();
+
+                if (response && response.success) {
+                    container.innerHTML = this.templates.membersPage(response.members);
+                    const searchInput = this.root.querySelector('#member-search-input');
+                    const tableBody = this.root.querySelector('#members-table-body');
+
+                    const renderTable = (members) => {
+                        tableBody.innerHTML = members && members.length > 0 
+                            ? members.map(m => this.templates.memberRow(m)).join('')
+                            : this.templates.emptyRow(3);
+                        
+                        tableBody.querySelectorAll('.view-member-details-btn').forEach(btn => {
+                            btn.addEventListener('click', e => {
+                                const userId = e.currentTarget.dataset.userid;
+                                this.renderMemberDetailsModal(userId);
+                            });
+                        });
+                    };
+
+                    renderTable(response.members);
+
+                    if (searchInput) {
+                        searchInput.addEventListener('input', (e) => {
+                            const searchTerm = e.target.value.toLowerCase();
+                            const filteredMembers = response.members.filter(member => {
+                                return member.username.toLowerCase().includes(searchTerm);
+                            });
+                            renderTable(filteredMembers);
+                        });
+                    }
+                } else {
+                    container.innerHTML = this.templates.errorPage('Falha ao carregar lista de membros.');
+                }
+            }
+
+            exportReport(format) {
+                const filters = {
+                    userId: this.state.selectedReportUser.userId,
+                    status: this.root.querySelector('#status-filter-select').value,
+                    startDate: this.root.querySelector('#start-date-filter').value,
+                    endDate: this.root.querySelector('#end-date-filter').value,
+                };
+                const params = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([_, v]) => v != null && v !== '')));
+                params.append('format', format);
+                window.open(`/api/registros/export?${params.toString()}`, '_blank');
+            }
+
+            async renderReportTable(isSpreadsheet = false) {
+                const tableId = isSpreadsheet ? '#spreadsheet-table-body' : '#reports-table-body';
+                const tableBody = this.root.querySelector(tableId);
+                if (!tableBody) return;
+
+                const colspan = isSpreadsheet ? 6 : 5;
+                tableBody.innerHTML = this.templates.loadingRow(colspan);
+
+                let filters = {};
+                if (isSpreadsheet) {
+                    filters = {};
+                } else {
+                    filters = {
+                        userId: this.state.selectedReportUser?.userId,
+                        status: this.root.querySelector('#status-filter-select')?.value,
+                        startDate: this.root.querySelector('#start-date-filter')?.value,
+                        endDate: this.root.querySelector('#end-date-filter')?.value,
+                    };
+                    if (!filters.userId) {
+                        tableBody.innerHTML = this.templates.emptyRow(colspan);
+                        return;
+                    }
+                }
+
+                const data = await this.api.getRegistros(filters);
+
+                if (data && data.success) {
+                    let allPontos = data.registros.flatMap(reg => reg.pontos.map(p => ({...p, username: reg.username, userId: reg.userId })));
+
+                    allPontos.sort((a,b) => new Date(b.entrada) - new Date(a.entrada));
+
+                    if (isSpreadsheet) {
+                        const { status, username } = this.state.spreadsheetFilters;
+                        if (status) {
+                            allPontos = allPontos.filter(p => {
+                                const isCompleted = !!p.saida;
+                                if (status === 'completed') return isCompleted;
+                                if (status === 'pending') return !isCompleted;
+                                return true;
+                            });
+                        }
+                        if (username) {
+                            allPontos = allPontos.filter(p => p.username.toLowerCase().includes(username.toLowerCase()));
+                        }
+                        allPontos = allPontos.slice(0, 100);
+                    }
+
+                    const rowTemplate = isSpreadsheet ? this.templates.spreadsheetRow : this.templates.reportRow;
+                    tableBody.innerHTML = allPontos.length > 0 ? allPontos.map(p => rowTemplate(p, this.formatDuration)).join('') : this.templates.emptyRow(colspan);
+                    this.setupActionListeners(tableBody);
+
+                    if (!isSpreadsheet) {
+                        const totalHoursEl = this.root.querySelector('#report-total-hours');
+                        if (totalHoursEl) {
+                            const periodDescription = this.getPeriodDescription(this.state.activeReportFilter, filters.startDate, filters.endDate);
+                            totalHoursEl.innerHTML = `Tempo Total ${periodDescription}: <span class="text-blue-500 font-bold">${this.formatDuration(data.totalDuration)}</span>`;
+                            totalHoursEl.style.display = data.registros.length > 0 ? 'block' : 'none';
+                        }
+                    }
+                } else {
+                    tableBody.innerHTML = this.templates.emptyRow(colspan);
+                }
+            }
+
+            async renderSpreadsheetPage(container) {
+                container.innerHTML = this.templates.spreadsheetPage(this.state.spreadsheetFilters);
+                this.setupSpreadsheetListeners();
+                const renderTable = () => this.renderReportTable(true);
+                this.state.timers.spreadsheet = setInterval(renderTable, 30000);
+                await renderTable();
+            }
+
+            setupSpreadsheetListeners() {
+                const statusFilter = this.root.querySelector('#spreadsheet-status-filter');
+                const userFilter = this.root.querySelector('#spreadsheet-user-filter');
+
+                const applyFilters = () => {
+                    this.state.spreadsheetFilters.status = statusFilter.value;
+                    this.state.spreadsheetFilters.username = userFilter.value;
+                    this.renderReportTable(true);
+                };
+
+                statusFilter.addEventListener('change', applyFilters);
+                userFilter.addEventListener('input', applyFilters);
+            }
+
+            renderSettingsPage(container) {
+                container.innerHTML = this.templates.settingsPage();
+            }
+
+            renderNotFoundPage(container) {
+                container.innerHTML = this.templates.notFoundPage();
+            }
+
+            setupCommonListeners() {
+                this.root.querySelector('#theme-toggle')?.addEventListener('click', () => this.toggleTheme());
+                window.onhashchange = () => this.navigateTo(window.location.hash.substring(1) || 'dashboard');
+                this.updateThemeUI();
+            }
+
+            setupActionListeners(container) {
+                container.querySelectorAll('.force-logout-btn').forEach(btn => btn.addEventListener('click', e => {
+                    const username = e.currentTarget.dataset.username;
+                    this.renderForceLogoutInfoModal(username);
+                }));
+                container.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', e => {
+                    const ponto = JSON.parse(e.currentTarget.dataset.ponto);
+                    this.renderEditModal(ponto);
+                }));
+                container.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', e => {
+                    this.renderDeleteModal(e.currentTarget.dataset.id);
+                }));
+            }
+
+            toggleTheme() {
+                this.state.theme = this.state.theme === 'light' ? 'dark' : 'light';
+                localStorage.setItem('theme', this.state.theme);
+                this.updateThemeUI();
+            }
+
+            updateThemeClass() { document.documentElement.className = this.state.theme; }
+            updateThemeUI() {
+                this.updateThemeClass();
+                const themeIcon = this.root.querySelector('#theme-toggle');
+                if(themeIcon) themeIcon.innerHTML = `<i class="fas fa-${this.state.theme === 'light' ? 'moon' : 'sun'} text-xl"></i>`;
+            }
+
+            clearTimers() {
+                Object.values(this.state.timers).forEach(timer => clearInterval(timer));
+                this.state.timers = {};
+            }
+
+            getWeekNumber(d) {
+                d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+                d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay()||7));
+                var yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+                var weekNo = Math.ceil((((d - yearStart) / 86400000) + 1)/7);
+                return weekNo;
+            }
+
+            getWeekDateRange(year, week) {
+                const d = new Date(year, 0, 1 + (week - 1) * 7);
+                const day = d.getDay();
+                const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+                const monday = new Date(d.setDate(diff));
+                const sunday = new Date(monday);
+                sunday.setDate(monday.getDate() + 6);
+                const formatDate = (date) => date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                return `${formatDate(monday)} - ${formatDate(sunday)}`;
+            }
+            
+            async renderMemberDetailsModal(userId) {
+                const res = await this.api.getMemberDetails(userId);
+                if (!res.success) {
+                    this.showToast(res.message || 'Falha ao carregar detalhes do membro.', 'error');
+                    return;
+                }
+
+                this.modalRoot.innerHTML = this.templates.memberDetailsModal(res.member);
+                const modal = this.modalRoot.querySelector('.modal-content');
+
+                const setupTab = (tabButton, tabContent) => {
+                    tabButton.addEventListener('click', async () => {
+                        modal.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+                        modal.querySelectorAll('.tab-content').forEach(content => content.style.display = 'none');
+                        tabButton.classList.add('active');
+                        tabContent.style.display = 'block';
+
+                        if (tabButton.id === 'stats-tab-btn' && !tabContent.dataset.loaded) {
+                            tabContent.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin"></i> Carregando estatísticas...</div>`;
+                            const statsRes = await this.api.getMemberStats(userId);
+                            if(statsRes.success) {
+                                tabContent.innerHTML = this.templates.memberStatsContent(statsRes.stats, this.formatDuration);
+                                this.renderChart('monthlyComparison', statsRes.stats, '#monthly-comparison-chart');
+                                tabContent.dataset.loaded = "true";
+                            } else {
+                                tabContent.innerHTML = this.templates.errorPage('Falha ao carregar estatísticas.');
+                            }
+                        }
+                    });
+                };
+
+                setupTab(modal.querySelector('#obs-tab-btn'), modal.querySelector('#obs-content'));
+                setupTab(modal.querySelector('#stats-tab-btn'), modal.querySelector('#stats-content'));
+
+                this.modalRoot.querySelector('.modal-close-btn').addEventListener('click', () => this.modalRoot.innerHTML = '');
+                this.modalRoot.querySelector('#add-observation-form').addEventListener('submit', async e => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const text = form.observationText.value;
+                    const author = this.state.user.name;
+
+                    const addResult = await this.api.addObservation(userId, { text, author });
+                    this.showToast(addResult.message, addResult.success ? 'success' : 'error');
+                    if (addResult.success) {
+                        await this.renderMemberDetailsModal(userId);
+                    }
+                });
+
+                modal.querySelector('#obs-tab-btn').click();
+            }
+
+            renderChart(type, data, selector) {
+                const ctx = this.root.querySelector(selector)?.getContext('2d');
+                if (!ctx) return;
+                
+                const chartId = selector.substring(1);
+                if (this.state.charts[chartId]) this.state.charts[chartId].destroy();
+
+                const chartColors = { text: this.state.theme === 'dark' ? '#94a3b8' : '#475569', grid: this.state.theme === 'dark' ? '#1e293b' : '#e2e8f0', cardBg: this.state.theme === 'dark' ? '#0f172a' : '#ffffff' };
+
+                let chartConfig;
+
+                if (type === 'status') {
+                    chartConfig = { type: 'doughnut', data: { labels: ['Fechados Hoje', 'Pendentes'], datasets: [{ data: [data.closedToday, data.pendingRegisters], backgroundColor: ['#22c55e', '#f59e0b'], borderColor: chartColors.cardBg, borderWidth: 5 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: chartColors.text } } } } };
+                } else if (type === 'activity') {
+                    const labels = [...Array(7)].map((_, i) => new Date(new Date().setDate(new Date().getDate() - i)).toISOString().slice(0, 10)).reverse();
+                    chartConfig = { type: 'line', data: { labels: labels.map(l => new Date(l).toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'})), datasets: [{ label: 'Registros', data: labels.map(l => data[l] || 0), backgroundColor: 'rgba(59, 130, 246, 0.1)', borderColor: '#3b82f6', borderWidth: 2, fill: true, tension: 0.4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: chartColors.text }, grid: { color: chartColors.grid } }, x: { ticks: { color: chartColors.text }, grid: { display: false } } }, plugins: { legend: { display: false } } } };
+                } else if (type === 'hourly') {
+                    chartConfig = { type: 'bar', data: { labels: Array.from({length: 24}, (_, i) => `${i.toString().padStart(2, '0')}:00`), datasets: [{ label: 'Registros por Hora', data: data, backgroundColor: 'rgba(96, 165, 250, 0.5)', borderColor: '#60a5fa', borderWidth: 1 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: chartColors.text, stepSize: 1 }, grid: { color: chartColors.grid } }, x: { ticks: { color: chartColors.text }, grid: { display: false } } }, plugins: { legend: { display: false } } } };
+                } else if (type === 'monthlyComparison') {
+                    chartConfig = { type: 'bar', data: { labels: ['Horas no Mês'], datasets: [{ label: 'Horas do Membro', data: [data.totalHoursThisMonth.toFixed(2)], backgroundColor: '#60a5fa' }, { label: 'Média da Equipe', data: [data.teamAverageHoursThisMonth.toFixed(2)], backgroundColor: '#6b7280' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, ticks: { color: chartColors.text, callback: value => `${value}h` }, grid: { color: chartColors.grid } }, y: { ticks: { color: chartColors.text }, grid: { display: false } } }, plugins: { legend: { position: 'bottom', labels: { color: chartColors.text } } } } };
+                }
+                
+                if (chartConfig) {
+                    this.state.charts[chartId] = new Chart(ctx, chartConfig);
+                }
+            }
+            
+            renderForceLogoutInfoModal(username) {
+                this.modalRoot.innerHTML = this.templates.forceLogoutInfoModal(username);
+                this.modalRoot.querySelector('.modal-close-btn').addEventListener('click', () => this.modalRoot.innerHTML = '');
+            }
+
+            renderEditModal(ponto) {
+                this.modalRoot.innerHTML = this.templates.editModal(ponto);
+                this.modalRoot.querySelector('.modal-close-btn').addEventListener('click', () => this.modalRoot.innerHTML = '');
+                this.modalRoot.querySelector('#edit-form').addEventListener('submit', async e => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const result = await this.api.updateRegistro(ponto._id, { entrada: form.entrada.value, saida: form.saida.value });
+                    this.showToast(result.message, result.success ? 'success' : 'error');
+                    if (result.success) {
+                        this.modalRoot.innerHTML = '';
+                        this.navigateTo(window.location.hash.substring(1));
+                    }
+                });
+            }
+
+            renderDeleteModal(pontoId) {
+                this.modalRoot.innerHTML = this.templates.deleteModal();
+                this.modalRoot.querySelector('.modal-close-btn').addEventListener('click', () => this.modalRoot.innerHTML = '');
+                this.modalRoot.querySelector('#confirm-delete-btn').addEventListener('click', async () => {
+                    const result = await this.api.deleteRegistro(pontoId);
+                    this.showToast(result.message, result.success ? 'success' : 'error');
+                    this.modalRoot.innerHTML = '';
+                    if (result.success) this.navigateTo(window.location.hash.substring(1));
+                });
+            }
+
+            showToast(message, type = 'info') {
+                const icons = { success: 'fa-check-circle', error: 'fa-times-circle', info: 'fa-info-circle' };
+                const colors = { success: 'bg-green-500', error: 'bg-red-500', info: 'bg-blue-500' };
+                const toast = document.createElement('div');
+                toast.className = `flex items-center w-full max-w-xs p-4 text-white ${colors[type]} rounded-lg shadow-lg page-fade-in`;
+                toast.innerHTML = `<div class="text-xl"><i class="fas ${icons[type]}"></i></div><div class="ml-3 text-sm font-medium">${message}</div>`;
+                this.toastRoot.appendChild(toast);
+                setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4000);
+            }
+
+            isColorDark(hexColor) {
+                if (!hexColor || hexColor.length < 4) return false;
+                let color = (hexColor.charAt(0) === '#') ? hexColor.substring(1, 7) : hexColor;
+                if (color.length === 3) {
+                    color = color[0] + color[0] + color[1] + color[1] + color[2] + color[2];
+                }
+                const r = parseInt(color.substring(0, 2), 16);
+                const g = parseInt(color.substring(2, 4), 16);
+                const b = parseInt(color.substring(4, 6), 16);
+                const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+                return luminance < 0.5;
+            }
+
+            defineApi() {
+                this.api = {
+                    fetch: async (endpoint, options = {}) => { try { const res = await fetch(`/api${endpoint}`, options); return res.json(); } catch (err) { return { success: false, message: 'Erro de rede.' }; } },
+                    getDashboardSummary: () => this.api.fetch('/dashboard/summary'),
+                    getRanking: (params) => this.api.fetch(`/ranking?${params}`),
+                    getRegistros: (filters = {}) => { const params = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([_, v]) => v != null && v !== ''))); return this.api.fetch(`/registros?${params}`); },
+                    getUniqueUsers: () => this.api.fetch('/unique-users'),
+                    getAlerts: () => this.api.fetch('/alerts'),
+                    getMembers: () => this.api.fetch('/members'),
+                    getMemberDetails: (userId) => this.api.fetch(`/members/${userId}`),
+                    getMemberStats: (userId) => this.api.fetch(`/members/${userId}/stats`),
+                    addObservation: (userId, data) => this.api.fetch(`/members/${userId}/observations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+                    updateRegistro: (pontoId, data) => this.api.fetch(`/registros/${pontoId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+                    deleteRegistro: (pontoId) => this.api.fetch(`/registros/${pontoId}`, { method: 'DELETE' }),
+                };
+            }
+
+            defineTemplates() {
+                this.templates = {
+                    alertBanner: (alerts) => `<div class="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 m-6 rounded-lg shadow-lg flex justify-between items-center page-fade-in" role="alert"><p><strong class="font-bold">Atenção:</strong> Existem ${alerts.length} ponto(s) aberto(s) há mais de 12 horas.</p><button class="close-alert-btn font-bold text-2xl leading-none px-2">&times;</button></div>`,
+                    appShell: (user) => `<div class="flex h-screen"><aside class="sidebar w-64 flex-shrink-0 flex flex-col border-r transition-all" style="background-color: var(--sidebar-bg); border-color: var(--border-color);"><div class="h-16 flex items-center justify-center px-4 border-b border-inherit"><h1 class="text-xl font-bold text-blue-500 flex items-center gap-2"><i class="fas fa-shield-alt"></i><span>PAINEL GCM</span></h1></div><nav class="flex-1 px-4 py-6 space-y-1.5" id="main-nav"><a href="#dashboard" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"><i class="fas fa-home w-6 mr-3 text-center"></i>Dashboard</a><a href="#ranking" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"><i class="fas fa-trophy w-6 mr-3 text-center"></i>Ranking</a><a href="#reports" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"><i class="fas fa-file-invoice w-6 mr-3 text-center"></i>Relatórios</a><a href="#spreadsheet" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"><i class="fas fa-table w-6 mr-3 text-center"></i>Planilha</a><a href="#members" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"><i class="fas fa-users w-6 mr-3 text-center"></i>Membros</a></nav><div class="p-4 border-t border-inherit"><a href="#settings" class="nav-link flex items-center px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors mb-2"><i class="fas fa-cog w-6 mr-3 text-center"></i>Configurações</a></div></aside><main class="flex-1 flex flex-col overflow-hidden"><header class="h-16 flex items-center justify-between px-6 border-b border-inherit flex-shrink-0 bg-[var(--card-bg)]/80 backdrop-blur-sm"><h2 id="page-title" class="text-2xl font-bold"></h2><div class="flex items-center space-x-4"><button id="theme-toggle" class="text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full w-10 h-10 flex items-center justify-center transition-colors"></button><div class="text-right"><div class="font-semibold text-sm">${user.name}</div><div class="text-xs text-text-secondary">${user.email}</div></div></div></header><div id="alert-container"></div><div id="page-content" class="flex-1 overflow-y-auto p-6 page-fade-in"></div></main></div>`,
+                    loadingDashboard: () => `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">${this.templates.summaryCard("Carregando...", "...", "fa-spinner fa-spin")}${this.templates.summaryCard("...", "...", "fa-spinner fa-spin")}${this.templates.summaryCard("...", "...", "fa-spinner fa-spin")}${this.templates.summaryCard("...", "...", "fa-spinner fa-spin")}</div><div class="text-center p-16 text-text-secondary"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`,
+                    dashboardPage: (s, formatDuration) => `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">${this.templates.summaryCard("Total de Agentes", s.totalAgents, "fa-users")}${this.templates.summaryCard("Pontos Pendentes", s.pendingRegisters, "fa-clock", "text-amber-500")}${this.templates.summaryCard("Fechados Hoje", s.closedToday, "fa-check-circle", "text-green-500")}${this.templates.summaryCard("Horas do Dia", formatDuration(s.hoursToday * 3600000), "fa-stopwatch", "text-blue-500")}</div><div class="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-6"><div class="lg:col-span-2 card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Atividade da Semana</h3><div class="h-80"><canvas id="activity-chart"></canvas></div></div><div class="card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Atividade Recente</h3><ul id="activity-feed" class="space-y-4"></ul></div></div><div class="mt-6 card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Registros por Hora (Hoje)</h3><div class="h-80"><canvas id="hourly-activity-chart"></canvas></div></div>`,
+                    activityFeedItem: (item) => `<li class="flex items-center text-sm"><i class="fas ${item.ponto.saida ? 'fa-sign-out-alt text-red-500' : 'fa-sign-in-alt text-green-500'} w-4 mr-3 flex-shrink-0"></i><div class="flex-grow"><span class="font-semibold">${item.username}</span> ${item.ponto.saida ? 'encerrou o ponto' : 'iniciou um ponto'}.</div><span class="ml-auto text-xs text-text-secondary flex-shrink-0">${new Date(item.ponto.saida || item.ponto.entrada).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'})}</span></li>`,
+                    summaryCard: (t, v, i, c = '') => `<div class="card rounded-xl p-5 shadow-lg border-0" style="background-color: var(--card-bg);"><div class="flex items-center"><div class="p-3 rounded-full bg-blue-500/10 text-blue-500 mr-4"><i class="fas ${i}"></i></div><div><h4 class="text-sm font-medium text-text-secondary">${t}</h4><p class="text-2xl font-bold mt-1 ${c}">${v}</p></div></div></div>`,
+                    reportsPage: (user, activeFilter) => `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit"><div class="flex justify-between items-start flex-wrap gap-4"><div class="flex items-center gap-4"><button id="back-to-users-btn" class="text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10 flex-shrink-0" title="Voltar para a lista"><i class="fas fa-arrow-left"></i></button><div><h3 class="text-xl font-bold">Relatório de: ${user.username}</h3><p id="report-total-hours" class="text-sm font-semibold text-text-secondary mt-1" style="display: none;"></p></div></div><div class="flex gap-2 flex-shrink-0"><button id="export-xlsx-btn" class="bg-green-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-green-700 transition-colors"><i class="fas fa-file-excel"></i>Excel</button><button id="export-pdf-btn" class="bg-red-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-red-700 transition-colors"><i class="fas fa-file-pdf"></i>PDF</button></div></div></div><div class="p-4 flex flex-col gap-4"><div class="flex items-center gap-2 flex-wrap"><span>Filtros Rápidos:</span><button id="qf-today" data-filter="today" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'today' ? 'active' : ''}">Hoje</button><button id="qf-week" data-filter="week" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'week' ? 'active' : ''}">Esta Semana</button><button id="qf-month" data-filter="month" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'month' ? 'active' : ''}">Este Mês</button></div><div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"><select id="status-filter-select" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><option value="">Todos Status</option><option value="completed">Completo</option><option value="pending">Pendente</option></select><input type="date" id="start-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><input type="date" id="end-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><button id="filter-btn" class="md-col-span-1 bg-blue-600 text-white font-semibold rounded-lg h-10 px-4 hover:bg-blue-700 transition-colors">Filtrar</button></div></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50"><tr><th class="px-6 py-3 text-left font-semibold">Entrada</th><th class="px-6 py-3 text-left font-semibold">Saída</th><th class="px-6 py-3 text-left font-semibold">Duração</th><th class="px-6 py-3 text-center font-semibold">Status</th><th class="px-6 py-3 text-center font-semibold">Ações</th></tr></thead><tbody id="reports-table-body" class="divide-y divide-inherit"></tbody></table></div></div>`,
+                    reportUserListPage: (users) => `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit"><h3 class="text-xl font-bold">Relatórios</h3><p class="text-sm text-text-secondary">Selecione um agente para ver seus registros de ponto.</p></div><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-6">${users.map(u => `<a href="#" class="user-report-link card p-4 flex items-center gap-3 rounded-lg hover:bg-blue-500/10 transition-colors" data-userid="${u.userId}" data-username="${u.username}"><i class="fas fa-user-circle text-2xl text-text-secondary"></i><span class="font-semibold">${u.username}</span></a>`).join('')}</div></div>`,
+                    reportRow: (p, formatDuration) => { const iC = p.entrada && p.saida, d = iC ? (new Date(p.saida) - new Date(p.entrada)) : 0; return `<tr class="hover:bg-slate-50 dark:hover:bg-slate-800/60"><td class="p-4 px-6 text-text-secondary">${new Date(p.entrada).toLocaleString('pt-BR')}</td><td class="p-4 px-6 text-text-secondary">${p.saida ? new Date(p.saida).toLocaleString('pt-BR') : '<span class="italic text-slate-500">Em serviço...</span>'}</td><td class="p-4 px-6 font-semibold">${iC ? formatDuration(d) : '---'}</td><td class="p-4 px-6 text-center"><span class="px-2.5 py-0.5 text-xs font-semibold rounded-full ${iC ? 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300'}">${iC ? 'Completo' : 'Pendente'}</span></td><td class="p-4 px-6 text-center"><div class="flex justify-center gap-2">${!iC ? `<button data-username="${p.username}" class="force-logout-btn text-text-secondary hover:text-amber-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Forçar Saída"><i class="fas fa-clock"></i></button>` : ''}<button data-ponto='${JSON.stringify(p)}' class="edit-btn text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Editar"><i class="fas fa-pencil-alt"></i></button><button data-id="${p._id}" class="delete-btn text-text-secondary hover:text-red-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Excluir"><i class="fas fa-trash-alt"></i></button></div></td></tr>` },
+                    spreadsheetRow: (p, formatDuration) => { const iC = p.entrada && p.saida, d = iC ? (new Date(p.saida) - new Date(p.entrada)) : 0; return `<tr class="hover:bg-slate-50 dark:hover:bg-slate-800/60"><td class="p-4 px-6 font-medium">${p.username}</td><td class="p-4 px-6 text-text-secondary">${new Date(p.entrada).toLocaleString('pt-BR')}</td><td class="p-4 px-6 text-text-secondary">${p.saida ? new Date(p.saida).toLocaleString('pt-BR') : '<span class="italic text-slate-500">Em serviço...</span>'}</td><td class="p-4 px-6 font-semibold">${iC ? formatDuration(d) : '---'}</td><td class="p-4 px-6 text-center"><span class="px-2.5 py-0.5 text-xs font-semibold rounded-full ${iC ? 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300'}">${iC ? 'Completo' : 'Pendente'}</span></td><td class="p-4 px-6 text-center"><div class="flex justify-center gap-2">${!iC ? `<button data-username="${p.username}" class="force-logout-btn text-text-secondary hover:text-amber-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Forçar Saída"><i class="fas fa-clock"></i></button>` : ''}<button data-ponto='${JSON.stringify(p)}' class="edit-btn text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Editar"><i class="fas fa-pencil-alt"></i></button><button data-id="${p._id}" class="delete-btn text-text-secondary hover:text-red-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" title="Excluir"><i class="fas fa-trash-alt"></i></button></div></td></tr>` },
+                    spreadsheetPage: (filters) => `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit flex flex-col md:flex-row justify-between items-center gap-4"><div><h3 class="text-xl font-bold">Planilha ao Vivo</h3><p class="text-sm text-text-secondary">Atualiza a cada 30 segundos.</p></div><div class="flex items-center gap-2"><select id="spreadsheet-status-filter" class="px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><option value="">Todos Status</option><option value="pending" ${filters.status === 'pending' ? 'selected' : ''}>Em Serviço</option><option value="completed" ${filters.status === 'completed' ? 'selected' : ''}>Finalizados</option></select><div class="relative"><i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary"></i><input type="text" id="spreadsheet-user-filter" placeholder="Buscar agente..." class="w-full md:w-48 pl-10 pr-4 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg" value="${filters.username}"></div></div></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50"><tr><th class="px-6 py-3 text-left font-semibold">Usuário</th><th class="px-6 py-3 text-left font-semibold">Entrada</th><th class="px-6 py-3 text-left font-semibold">Saída</th><th class="px-6 py-3 text-left font-semibold">Duração</th><th class="px-6 py-3 text-center font-semibold">Status</th><th class="px-6 py-3 text-center font-semibold">Ações</th></tr></thead><tbody id="spreadsheet-table-body" class="divide-y divide-inherit"></tbody></table></div></div>`,
+                    settingsPage: () => `<div class="card rounded-xl p-6 shadow-lg border-0 max-w-2xl mx-auto" style="background-color: var(--card-bg);"><h3 class="text-xl font-bold mb-1">Configurações</h3><p class="text-sm text-text-secondary mb-6">Ajustes gerais do sistema.</p><div class="text-center p-8 border-2 border-dashed border-border-color rounded-lg text-text-secondary">Página de Configurações em construção.</div></div>`,
+                    errorPage: (message) => `<div class="text-center p-16"><i class="fas fa-exclamation-triangle text-4xl text-red-500 mb-4"></i><h1 class="text-2xl font-bold">Ocorreu um Erro</h1><p class="text-text-secondary">${message}</p></div>`,
+                    loadingRow: c => `<tr><td colspan="${c}" class="text-center p-8 text-text-secondary"><i class="fas fa-spinner fa-spin mr-2"></i>Carregando...</td></tr>`,
+                    emptyRow: c => `<tr><td colspan="${c}" class="text-center p-8 text-text-secondary"><i class="fas fa-inbox mr-2"></i>Nenhum registro encontrado.</td></tr>`,
+                    notFoundPage: () => `<div class="text-center p-16"><h1 class="text-4xl font-bold">404</h1><p class="text-text-secondary">Página não encontrada.</p></div>`,
+                    forceLogoutInfoModal: (username) => `<div class="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4"><div class="card rounded-2xl shadow-2xl w-full max-w-md border-0 p-6 text-center page-fade-in" style="background-color: var(--card-bg);"><i class="fas fa-info-circle text-4xl text-blue-500 mb-4"></i><h3 class="text-xl font-bold mb-2">Use o Comando no Discord</h3><p class="text-text-secondary mb-4">Para forçar a saída do agente <strong>${username}</strong>, utilize o comando abaixo diretamente no Discord:</p><code class="block w-full text-left bg-slate-100 dark:bg-slate-800 p-3 rounded-lg text-sm font-mono mb-6">/forcar-saida usuario:@${username}</code><div class="flex justify-center"><button class="modal-close-btn bg-blue-600 text-white font-semibold rounded-lg px-6 py-2 hover:bg-blue-700 transition-all">Entendi</button></div></div></div>`,
+                    editModal: p => `<div class="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4"><div class="card rounded-2xl shadow-2xl w-full max-w-md border-0 page-fade-in" style="background-color: var(--card-bg);"><form id="edit-form" class="p-6"><h3 class="text-xl font-bold mb-4">Editar Registro</h3><div class="space-y-4"><div><label class="block text-sm font-medium mb-1">Entrada</label><input type="datetime-local" name="entrada" class="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg" value="${new Date(new Date(p.entrada).getTime() - (new Date().getTimezoneOffset() * 60000)).toISOString().slice(0, 16)}" required></div><div><label class="block text-sm font-medium mb-1">Saída</label><input type="datetime-local" name="saida" class="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg" value="${p.saida ? new Date(new Date(p.saida).getTime() - (new Date().getTimezoneOffset() * 60000)).toISOString().slice(0, 16) : ''}" required></div></div><div class="flex justify-end gap-3 mt-6"><button type="button" class="modal-close-btn px-4 py-2 rounded-lg hover:bg-slate-500/10">Cancelar</button><button type="submit" class="bg-blue-600 text-white font-semibold rounded-lg px-5 py-2 hover:bg-blue-700 transition-all">Salvar</button></div></form></div></div>`,
+                    deleteModal: () => `<div class="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4"><div class="card rounded-2xl shadow-2xl w-full max-w-sm border-0 p-6 text-center page-fade-in" style="background-color: var(--card-bg);"><i class="fas fa-exclamation-triangle text-4xl text-red-500 mb-4"></i><h3 class="text-xl font-bold mb-2">Excluir Registro?</h3><p class="text-text-secondary mb-6">Esta ação é irreversível.</p><div class="flex justify-center gap-3"><button class="modal-close-btn px-6 py-2 rounded-lg hover:bg-slate-500/10">Cancelar</button><button id="confirm-delete-btn" class="bg-red-600 text-white font-semibold rounded-lg px-6 py-2 hover:bg-red-700 transition-all">Excluir</button></div></div></div>`,
+                    rankingPage: (filters, getWeekNumber, getWeekDateRange) => {
+                        const isWeekly = filters.period === 'weekly';
+                        const years = Array.from({length: 5}, (_, i) => new Date().getFullYear() - i);
+                        const months = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+                        const weeks = Array.from({length: 53}, (_, i) => i + 1);
+                        return `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit flex flex-col sm:flex-row justify-between items-center gap-4"><h3 class="text-xl font-bold flex items-center gap-3"><i class="fas fa-trophy"></i>Ranking de Atividade</h3><div class="flex items-center gap-2 flex-wrap justify-center"><select id="ranking-period-select" class="px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><option value="weekly" ${isWeekly ? 'selected' : ''}>Semanal</option><option value="monthly" ${!isWeekly ? 'selected' : ''}>Mensal</option></select><select id="ranking-year-select" class="px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg">${years.map(y => `<option value="${y}" ${y === filters.year ? 'selected' : ''}>${y}</option>`).join('')}</select><select id="ranking-month-select" class="px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg" style="display: ${isWeekly ? 'none' : 'block'};">${months.map((m, i) => `<option value="${i}" ${i === filters.month ? 'selected' : ''}>${m}</option>`).join('')}</select><select id="ranking-week-select" class="px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg" style="display: ${isWeekly ? 'block' : 'none'};">${weeks.map(w => `<option value="${w}" ${w === filters.week ? 'selected' : ''}>Semana ${w} (${getWeekDateRange(filters.year, w)})</option>`).join('')}</select></div></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50"><tr><th class="px-6 py-3 text-center font-semibold w-16">#</th><th class="px-6 py-3 text-left font-semibold">Agente</th><th class="px-6 py-3 text-right font-semibold">Tempo Total</th></tr></thead><tbody id="ranking-list-container" class="divide-y divide-inherit"></tbody></table></div></div>`;
+                    },
+                    rankingItem: (item, index, formatDuration) => {
+                        const colors = ['text-amber-400', 'text-slate-400', 'text-amber-600'];
+                        const icon = index < 3 ? `<i class="fas fa-trophy ${colors[index]}"></i>` : `<span class="font-semibold text-text-secondary">${index + 1}</span>`;
+                        return `<tr class="hover:bg-slate-500/10"><td class="p-4 text-center text-lg">${icon}</td><td class="p-4 px-6 font-semibold">${item.username}</td><td class="p-4 px-6 text-right font-bold text-blue-500">${formatDuration(item.totalDuration)}</td></tr>`;
+                    },
+                    
+                    // --- TEMPLATES MODIFICADOS ---
+                    membersPage: (members) => `
+                        <div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);">
+                            <div class="p-6 border-b border-inherit flex flex-col md:flex-row justify-between items-center gap-4">
+                                <div>
+                                    <h3 class="text-xl font-bold">Membros do Discord</h3>
+                                    <p class="text-sm text-text-secondary">Lista de membros e seus cargos sincronizados.</p>
+                                </div>
+                                <div class="relative w-full md:w-auto">
+                                    <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary"></i>
+                                    <input type="text" id="member-search-input" placeholder="Buscar membro..." class="w-full md:w-64 pl-10 pr-4 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg">
+                                </div>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full text-sm">
+                                    <thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50">
+                                        <tr>
+                                            <th class="px-6 py-3 text-left font-semibold">Membro</th>
+                                            <th class="px-6 py-3 text-left font-semibold">Cargos</th>
+                                            <th class="px-6 py-3 text-right font-semibold">Ações</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="members-table-body" class="divide-y divide-inherit">
+                                        ${members && members.length > 0 ? members.map(m => this.templates.memberRow(m)).join('') : this.templates.emptyRow(3)}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>`,
+
+                    memberRow: (member) => `
+                        <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                            <td class="p-4 px-6">
+                                <div class="flex items-center gap-4">
+                                    <img src="${member.avatarUrl || 'https://cdn.discordapp.com/embed/avatars/0.png'}" alt="Avatar" class="w-10 h-10 rounded-full">
+                                    <div>
+                                        <div class="font-semibold">${member.username}</div>
+                                        <div class="text-xs text-text-secondary">${member.discordUserId}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="p-4 px-6">
+                                <div class="flex flex-wrap gap-2">
+                                    ${member.roles.length > 0 ? member.roles.map(role => `<span class="text-xs font-semibold px-2 py-1 rounded-full flex items-center" style="background-color: ${role.color || '#99aab5'}; color: ${this.isColorDark(role.color || '#99aab5') ? '#FFF' : '#000'};"><i class="fas fa-circle fa-xs mr-1.5" style="opacity: 0.5;"></i> ${role.name}</span>`).join('') : '<span class="text-xs text-text-secondary italic">Nenhum cargo.</span>'}
+                                </div>
+                            </td>
+                            <td class="p-4 px-6 text-right">
+                                <button class="view-member-details-btn text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10" data-userid="${member.discordUserId}" title="Ver Detalhes">
+                                    <i class="fas fa-ellipsis-h"></i>
+                                </button>
+                            </td>
+                        </tr>`,
+
+                    memberDetailsModal: (member) => `
+                        <div class="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4">
+                            <div class="modal-content card rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col border-0 page-fade-in" style="background-color: var(--card-bg);">
+                                <div class="p-6 border-b border-inherit flex items-center justify-between flex-shrink-0">
+                                    <div class="flex items-center gap-4 min-w-0"><img src="${member.avatarUrl || 'https://cdn.discordapp.com/embed/avatars/0.png'}" alt="Avatar" class="w-12 h-12 rounded-full"><div class="min-w-0"><h3 class="text-xl font-bold truncate">${member.username}</h3><p class="text-sm text-text-secondary">${member.discordUserId}</p></div></div>
+                                    <button class="modal-close-btn text-text-secondary hover:text-red-500 w-8 h-8 rounded-lg hover:bg-slate-500/10 flex-shrink-0" title="Fechar"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div class="border-b border-inherit flex-shrink-0"><div class="px-6 flex items-center gap-6"><button id="obs-tab-btn" class="tab-btn font-semibold py-3 border-b-2 border-transparent">Observações</button><button id="stats-tab-btn" class="tab-btn font-semibold py-3 border-b-2 border-transparent">Estatísticas</button></div></div>
+                                <div class="flex-grow overflow-y-auto p-6">
+                                    <div id="obs-content" class="tab-content" style="display: none;">
+                                        <div id="observations-list" class="space-y-4 mb-6">${member.observations && member.observations.length > 0 ? member.observations.map(obs => `<div class="p-3 rounded-lg bg-slate-100 dark:bg-slate-800"><p class="text-sm">${obs.text}</p><p class="text-xs text-text-secondary text-right mt-1">Por <strong>${obs.author}</strong> em ${new Date(obs.date).toLocaleString('pt-BR')}</p></div>`).join('') : '<p class="text-sm text-text-secondary italic text-center">Nenhuma observação registrada.</p>'}</div>
+                                        <form id="add-observation-form"><h4 class="font-bold mb-2">Adicionar Nova Observação</h4><textarea name="observationText" class="w-full p-2 bg-slate-100 dark:bg-slate-800 rounded-lg" rows="3" placeholder="Digite a observação..." required></textarea><div class="flex justify-end mt-2"><button type="submit" class="bg-blue-600 text-white font-semibold rounded-lg px-5 py-2 hover:bg-blue-700 transition-all">Adicionar</button></div></form>
+                                    </div>
+                                    <div id="stats-content" class="tab-content" style="display: none;"></div>
+                                </div>
+                            </div>
+                        </div>`,
+                    memberStatsContent: (stats, formatDuration) => `
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            ${this.templates.summaryCard("Duração Média do Turno", formatDuration(stats.averageDuration, true), "fa-history")}
+                            ${this.templates.summaryCard("Horas no Mês Atual", `${stats.totalHoursThisMonth.toFixed(1)}h`, "fa-calendar-alt")}
+                        </div>
+                        <div class="card rounded-xl p-5 shadow-lg border-0 mb-6" style="background-color: var(--card-bg);"><h4 class="font-semibold mb-4 text-lg">Comparativo de Horas no Mês</h4><div class="h-48"><canvas id="monthly-comparison-chart"></canvas></div></div>
+                        <div>
+                            <h4 class="font-semibold mb-4 text-lg">Horários de Pico (Últimos 90 dias)</h4>
+                            <div class="overflow-x-auto">
+                                <table class="w-full border-collapse text-xs text-center">
+                                    <thead><tr><th class="w-12"></th>${Array.from({length: 12}, (_, i) => `<th colspan="2" class="pb-1">${i*2}h</th>`).join('')}</tr></thead>
+                                    <tbody>
+                                    ${['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((day, dayIndex) => `
+                                        <tr><td class="font-bold pr-2 text-right">${day}</td>
+                                        ${stats.activityHeatmap[dayIndex].map(count => {
+                                            const max = Math.max(...stats.activityHeatmap.flat());
+                                            const opacity = max > 0 ? (count / max) : 0;
+                                            return `<td class="heatmap-cell border border-gray-500/20 h-4 w-4" style="background-color: rgba(96, 165, 250, ${opacity});" title="${count} registro(s)"></td>`;
+                                        }).join('')}
+                                        </tr>`).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>`,
+                };
+            }
+        }
+        new GcmPanelApp(document.getElementById('app-root'));
+    </script>
+</body>
+</html>
