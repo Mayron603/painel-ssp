@@ -40,8 +40,6 @@ const clientPromise = mongoose.connect(process.env.MONGO_URI)
 // App Express
 const app = express();
 
-app.set('trust proxy', 1);
-
 app.use(cors({ origin: process.env.CORS_ORIGIN, credentials: true }));
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json());
