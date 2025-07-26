@@ -8,7 +8,7 @@ if (!process.env.MONGO_URI) {
 // Importações de Pacotes
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors');
+const cors =require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const ExcelJS = require('exceljs');
@@ -25,6 +25,17 @@ const IGNORED_MEMBER_IDS_API = [
     '511297052844621827'
 ];
 // -------------------------------------------
+
+// --- NOVO: Mapeamento de IDs para Nomes de Batalhões ---
+const batalhaoNameMapping = {
+    'bprv': '1º CPRv',
+    'baep': '7º BAEP',
+    'cavpm': 'CavPM',
+    'ftatica': 'FORÇA TÁTICA 23º BPM/M',
+    'operacional': '23º BPM/M Operacional'
+};
+// ---------------------------------------------------------
+
 
 // Conexão com MongoDB
 const clientPromise = mongoose.connect(process.env.MONGO_URI)
@@ -275,16 +286,23 @@ app.get('/api/registros', async (req, res) => {
     }
 });
 
-// NOVA ROTA PARA BUSCAR BATALHÕES
+// ROTA MODIFICADA PARA BUSCAR BATALHÕES COM NOMES FORMATADOS
 app.get('/api/batalhoes', async (req, res) => {
     try {
-        const batalhoes = await Registro.distinct('batalhaoId');
-        res.json({ success: true, batalhoes: batalhoes.sort() });
+        const batalhaoIds = await Registro.distinct('batalhaoId');
+        
+        const batalhoes = batalhaoIds.map(id => ({
+            id: id,
+            name: batalhaoNameMapping[id.toLowerCase()] || id // Usa o mapeamento ou o ID original como fallback
+        })).sort((a, b) => a.name.localeCompare(b.name)); // Ordena pelo nome formatado
+
+        res.json({ success: true, batalhoes });
     } catch (error) {
         console.error("Erro ao buscar batalhões:", error);
         res.status(500).json({ success: false, message: 'Erro ao buscar batalhões.' });
     }
 });
+
 
 // ROTA MODIFICADA PARA FILTRAR USUÁRIOS POR BATALHÃO
 app.get('/api/unique-users', async (req, res) => {
