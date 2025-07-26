@@ -10,7 +10,12 @@ const registroSchema = new mongoose.Schema({
         type: String, 
         required: true 
     },
-    // Novo campo para rastrear o aviso
+    // CAMPO ADICIONADO QUE FALTAVA
+    batalhaoId: {
+        type: String,
+        required: true,
+        index: true
+    },
     ultimoAvisoEnviado: {
         type: Date,
         default: null
@@ -27,5 +32,8 @@ const registroSchema = new mongoose.Schema({
         }
     ]
 }, { timestamps: true });
+
+// Índice composto para otimizar buscas
+registroSchema.index({ userId: 1, batalhaoId: 1 });
 
 module.exports = mongoose.model('Registro', registroSchema);
