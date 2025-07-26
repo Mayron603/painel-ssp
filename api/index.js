@@ -275,15 +275,34 @@ app.get('/api/registros', async (req, res) => {
     }
 });
 
+// NOVA ROTA PARA BUSCAR BATALHÕES
+app.get('/api/batalhoes', async (req, res) => {
+    try {
+        const batalhoes = await Registro.distinct('batalhaoId');
+        res.json({ success: true, batalhoes: batalhoes.sort() });
+    } catch (error) {
+        console.error("Erro ao buscar batalhões:", error);
+        res.status(500).json({ success: false, message: 'Erro ao buscar batalhões.' });
+    }
+});
 
+// ROTA MODIFICADA PARA FILTRAR USUÁRIOS POR BATALHÃO
 app.get('/api/unique-users', async (req, res) => {
+    const { batalhaoId } = req.query;
+    const matchStage = {};
+    if (batalhaoId) {
+        matchStage.batalhaoId = batalhaoId;
+    }
+
     const users = await Registro.aggregate([
+        { $match: matchStage },
         { $group: { _id: { userId: "$userId", username: "$username" } } },
         { $sort: { "_id.username": 1 } },
         { $project: { userId: "$_id.userId", username: "$_id.username", _id: 0 } }
     ]);
     res.json({ success: true, users });
 });
+
 
 app.get('/api/dashboard/summary', async (req, res) => {
     const todayStart = new Date();
