@@ -39,7 +39,7 @@
                     theme: 'dark',
                     timers: {},
                     charts: {},
-                    selectedBatalhao: null, // NOVO ESTADO
+                    selectedBatalhao: null,
                     selectedReportUser: null,
                     activeReportFilter: null,
                     rankingFilters: {
@@ -95,7 +95,6 @@
 
             async navigateTo(page) {
                 this.clearTimers();
-                // Limpa os estados de seleção ao sair da página de relatórios
                 if (page !== 'reports') {
                     this.state.selectedReportUser = null;
                     this.state.selectedBatalhao = null;
@@ -220,28 +219,20 @@
                 weekSelect.addEventListener('change', handleFilterChange);
             }
 
-            // --- LÓGICA DA PÁGINA DE RELATÓRIOS MODIFICADA ---
             async renderReportsPage(container) {
                 container.innerHTML = this.templates.loadingDashboard();
 
                 if (this.state.selectedReportUser) {
-                    // 3. Etapa Final: Renderiza o relatório para o usuário selecionado
                     await this.renderReportForUser(container, this.state.selectedReportUser);
-
                 } else if (this.state.selectedBatalhao) {
-                    // 2. Segunda Etapa: Se um batalhão foi selecionado, mostra a lista de usuários
-                    const usersResponse = await this.api.getUniqueUsers(this.state.selectedBatalhao);
+                    const usersResponse = await this.api.getUniqueUsers(this.state.selectedBatalhao.id);
                     if (usersResponse.success) {
                         container.innerHTML = this.templates.reportUserListPage(usersResponse.users, this.state.selectedBatalhao);
-                        
-                        // Event listener para o botão de voltar para a lista de batalhões
                         container.querySelector('#back-to-batalhoes-btn').addEventListener('click', (e) => {
                             e.preventDefault();
                             this.state.selectedBatalhao = null;
                             this.renderReportsPage(container);
                         });
-                        
-                        // Event listeners para selecionar um usuário
                         container.querySelectorAll('.user-report-link').forEach(link => {
                             link.addEventListener('click', (e) => {
                                 e.preventDefault();
@@ -254,16 +245,14 @@
                     } else {
                         container.innerHTML = this.templates.errorPage('Falha ao carregar lista de usuários.');
                     }
-
                 } else {
-                    // 1. Etapa Inicial: Mostra a lista de batalhões para seleção
                     const batalhoesResponse = await this.api.getBatalhoes();
                     if (batalhoesResponse.success) {
                         container.innerHTML = this.templates.reportBatalhaoListPage(batalhoesResponse.batalhoes);
                         container.querySelectorAll('.batalhao-report-link').forEach(link => {
                             link.addEventListener('click', (e) => {
                                 e.preventDefault();
-                                this.state.selectedBatalhao = e.currentTarget.dataset.batalhaoid;
+                                this.state.selectedBatalhao = JSON.parse(e.currentTarget.dataset.batalhao);
                                 this.renderReportsPage(container);
                             });
                         });
@@ -273,10 +262,8 @@
                 }
             }
 
-
             async renderReportForUser(container, user) {
-                container.innerHTML = this.templates.reportsPage(user, this.state.activeReportFilter, this.state.selectedBatalhao);
-
+                container.innerHTML = this.templates.reportsPage(user, this.state.activeReportFilter, this.state.selectedBatalhao.name);
                 this.setupReportListeners();
                 await this.renderReportTable(false);
             }
@@ -289,8 +276,6 @@
                 });
                 this.root.querySelector('#export-xlsx-btn').addEventListener('click', () => this.exportReport('xlsx'));
                 this.root.querySelector('#export-pdf-btn').addEventListener('click', () => this.exportReport('pdf'));
-                
-                // Botão de voltar agora reseta apenas o usuário, mantendo o batalhão selecionado
                 this.root.querySelector('#back-to-users-btn').addEventListener('click', () => {
                     this.state.selectedReportUser = null;
                     this.renderReportsPage(this.root.querySelector('#page-content'));
@@ -695,15 +680,14 @@
                 return luminance < 0.5;
             }
 
-            // --- API DEFINITION MODIFICADA ---
             defineApi() {
                 this.api = {
                     fetch: async (endpoint, options = {}) => { try { const res = await fetch(`/api${endpoint}`, options); return res.json(); } catch (err) { return { success: false, message: 'Erro de rede.' }; } },
                     getDashboardSummary: () => this.api.fetch('/dashboard/summary'),
                     getRanking: (params) => this.api.fetch(`/ranking?${params}`),
                     getRegistros: (filters = {}) => { const params = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([_, v]) => v != null && v !== ''))); return this.api.fetch(`/registros?${params}`); },
-                    getBatalhoes: () => this.api.fetch('/batalhoes'), // NOVA CHAMADA
-                    getUniqueUsers: (batalhaoId) => { // CHAMADA MODIFICADA
+                    getBatalhoes: () => this.api.fetch('/batalhoes'),
+                    getUniqueUsers: (batalhaoId) => {
                         const endpoint = batalhaoId ? `/unique-users?batalhaoId=${encodeURIComponent(batalhaoId)}` : '/unique-users';
                         return this.api.fetch(endpoint);
                     },
@@ -717,7 +701,6 @@
                 };
             }
 
-            // --- TEMPLATES MODIFICADOS ---
             defineTemplates() {
                 this.templates = {
                     alertBanner: (alerts) => `<div class="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 m-6 rounded-lg shadow-lg flex justify-between items-center page-fade-in" role="alert"><p><strong class="font-bold">Atenção:</strong> Existem ${alerts.length} ponto(s) aberto(s) há mais de 12 horas.</p><button class="close-alert-btn font-bold text-2xl leading-none px-2">&times;</button></div>`,
@@ -726,9 +709,8 @@
                     dashboardPage: (s, formatDuration) => `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">${this.templates.summaryCard("Total de Agentes", s.totalAgents, "fa-users")}${this.templates.summaryCard("Pontos Pendentes", s.pendingRegisters, "fa-clock", "text-amber-500")}${this.templates.summaryCard("Fechados Hoje", s.closedToday, "fa-check-circle", "text-green-500")}${this.templates.summaryCard("Horas do Dia", formatDuration(s.hoursToday * 3600000), "fa-stopwatch", "text-blue-500")}</div><div class="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-6"><div class="lg:col-span-2 card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Atividade da Semana</h3><div class="h-80"><canvas id="activity-chart"></canvas></div></div><div class="card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Atividade Recente</h3><ul id="activity-feed" class="space-y-4"></ul></div></div><div class="mt-6 card rounded-xl shadow-lg p-6 border-0" style="background-color: var(--card-bg);"><h3 class="font-semibold mb-4 text-lg">Registros por Hora (Hoje)</h3><div class="h-80"><canvas id="hourly-activity-chart"></canvas></div></div>`,
                     activityFeedItem: (item) => `<li class="flex items-center text-sm"><i class="fas ${item.ponto.saida ? 'fa-sign-out-alt text-red-500' : 'fa-sign-in-alt text-green-500'} w-4 mr-3 flex-shrink-0"></i><div class="flex-grow"><span class="font-semibold">${item.username}</span> ${item.ponto.saida ? 'encerrou o ponto' : 'iniciou um ponto'}.</div><span class="ml-auto text-xs text-text-secondary flex-shrink-0">${new Date(item.ponto.saida || item.ponto.entrada).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'})}</span></li>`,
                     summaryCard: (t, v, i, c = '') => `<div class="card rounded-xl p-5 shadow-lg border-0" style="background-color: var(--card-bg);"><div class="flex items-center"><div class="p-3 rounded-full bg-blue-500/10 text-blue-500 mr-4"><i class="fas ${i}"></i></div><div><h4 class="text-sm font-medium text-text-secondary">${t}</h4><p class="text-2xl font-bold mt-1 ${c}">${v}</p></div></div></div>`,
-                    reportsPage: (user, activeFilter, batalhaoId) => `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit"><div class="flex justify-between items-start flex-wrap gap-4"><div class="flex items-center gap-4"><button id="back-to-users-btn" class="text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10 flex-shrink-0" title="Voltar para a lista de Agentes"><i class="fas fa-arrow-left"></i></button><div><h3 class="text-xl font-bold">Relatório de: ${user.username}</h3><p class="text-sm text-text-secondary">Batalhão: ${batalhaoId}</p><p id="report-total-hours" class="text-sm font-semibold text-text-secondary mt-1" style="display: none;"></p></div></div><div class="flex gap-2 flex-shrink-0"><button id="export-xlsx-btn" class="bg-green-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-green-700 transition-colors"><i class="fas fa-file-excel"></i>Excel</button><button id="export-pdf-btn" class="bg-red-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-red-700 transition-colors"><i class="fas fa-file-pdf"></i>PDF</button></div></div></div><div class="p-4 flex flex-col gap-4"><div class="flex items-center gap-2 flex-wrap"><span>Filtros Rápidos:</span><button id="qf-today" data-filter="today" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'today' ? 'active' : ''}">Hoje</button><button id="qf-week" data-filter="week" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'week' ? 'active' : ''}">Esta Semana</button><button id="qf-month" data-filter="month" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'month' ? 'active' : ''}">Este Mês</button></div><div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"><select id="status-filter-select" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><option value="">Todos Status</option><option value="completed">Completo</option><option value="pending">Pendente</option></select><input type="date" id="start-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><input type="date" id="end-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><button id="filter-btn" class="md-col-span-1 bg-blue-600 text-white font-semibold rounded-lg h-10 px-4 hover:bg-blue-700 transition-colors">Filtrar</button></div></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50"><tr><th class="px-6 py-3 text-left font-semibold">Entrada</th><th class="px-6 py-3 text-left font-semibold">Saída</th><th class="px-6 py-3 text-left font-semibold">Duração</th><th class="px-6 py-3 text-center font-semibold">Status</th><th class="px-6 py-3 text-center font-semibold">Ações</th></tr></thead><tbody id="reports-table-body" class="divide-y divide-inherit"></tbody></table></div></div>`,
+                    reportsPage: (user, activeFilter, batalhaoName) => `<div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);"><div class="p-6 border-b border-inherit"><div class="flex justify-between items-start flex-wrap gap-4"><div class="flex items-center gap-4"><button id="back-to-users-btn" class="text-text-secondary hover:text-blue-500 w-8 h-8 rounded-lg hover:bg-slate-500/10 flex-shrink-0" title="Voltar para a lista de Agentes"><i class="fas fa-arrow-left"></i></button><div><h3 class="text-xl font-bold">Relatório de: ${user.username}</h3><p class="text-sm text-text-secondary">Batalhão: ${batalhaoName}</p><p id="report-total-hours" class="text-sm font-semibold text-text-secondary mt-1" style="display: none;"></p></div></div><div class="flex gap-2 flex-shrink-0"><button id="export-xlsx-btn" class="bg-green-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-green-700 transition-colors"><i class="fas fa-file-excel"></i>Excel</button><button id="export-pdf-btn" class="bg-red-600 text-white font-semibold rounded-lg h-9 px-4 text-sm flex items-center gap-2 hover:bg-red-700 transition-colors"><i class="fas fa-file-pdf"></i>PDF</button></div></div></div><div class="p-4 flex flex-col gap-4"><div class="flex items-center gap-2 flex-wrap"><span>Filtros Rápidos:</span><button id="qf-today" data-filter="today" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'today' ? 'active' : ''}">Hoje</button><button id="qf-week" data-filter="week" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'week' ? 'active' : ''}">Esta Semana</button><button id="qf-month" data-filter="month" class="quick-filter-btn px-3 py-1 text-sm font-semibold rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors ${activeFilter === 'month' ? 'active' : ''}">Este Mês</button></div><div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"><select id="status-filter-select" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><option value="">Todos Status</option><option value="completed">Completo</option><option value="pending">Pendente</option></select><input type="date" id="start-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><input type="date" id="end-date-filter" class="md:col-span-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 border-transparent rounded-lg"><button id="filter-btn" class="md-col-span-1 bg-blue-600 text-white font-semibold rounded-lg h-10 px-4 hover:bg-blue-700 transition-colors">Filtrar</button></div></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><thead class="text-xs text-text-secondary uppercase bg-slate-50 dark:bg-slate-800/50"><tr><th class="px-6 py-3 text-left font-semibold">Entrada</th><th class="px-6 py-3 text-left font-semibold">Saída</th><th class="px-6 py-3 text-left font-semibold">Duração</th><th class="px-6 py-3 text-center font-semibold">Status</th><th class="px-6 py-3 text-center font-semibold">Ações</th></tr></thead><tbody id="reports-table-body" class="divide-y divide-inherit"></tbody></table></div></div>`,
                     
-                    // NOVO TEMPLATE: LISTA DE BATALHÕES
                     reportBatalhaoListPage: (batalhoes) => `
                         <div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);">
                             <div class="p-6 border-b border-inherit">
@@ -737,15 +719,14 @@
                             </div>
                             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-6">
                                 ${batalhoes.length > 0 ? batalhoes.map(b => `
-                                    <a href="#" class="batalhao-report-link card p-4 flex items-center gap-3 rounded-lg hover:bg-blue-500/10 transition-colors" data-batalhaoid="${b}">
+                                    <a href="#" class="batalhao-report-link card p-4 flex items-center gap-3 rounded-lg hover:bg-blue-500/10 transition-colors" data-batalhao='${JSON.stringify(b)}'>
                                         <i class="fas fa-building text-2xl text-text-secondary"></i>
-                                        <span class="font-semibold">${b}</span>
+                                        <span class="font-semibold">${b.name}</span>
                                     </a>`).join('') : '<p class="text-sm text-text-secondary italic">Nenhum batalhão com registros encontrado.</p>'}
                             </div>
                         </div>`,
 
-                    // TEMPLATE MODIFICADO: LISTA DE USUÁRIOS
-                    reportUserListPage: (users, batalhaoId) => `
+                    reportUserListPage: (users, batalhao) => `
                         <div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);">
                             <div class="p-6 border-b border-inherit">
                                 <div class="flex items-center gap-4">
@@ -753,7 +734,7 @@
                                         <i class="fas fa-arrow-left"></i>
                                     </button>
                                     <div>
-                                        <h3 class="text-xl font-bold">Batalhão: ${batalhaoId}</h3>
+                                        <h3 class="text-xl font-bold">Batalhão: ${batalhao.name}</h3>
                                         <p class="text-sm text-text-secondary">Selecione um agente para ver seus registros.</p>
                                     </div>
                                 </div>
@@ -790,7 +771,6 @@
                         return `<tr class="hover:bg-slate-500/10"><td class="p-4 text-center text-lg">${icon}</td><td class="p-4 px-6 font-semibold">${item.username}</td><td class="p-4 px-6 text-right font-bold text-blue-500">${formatDuration(item.totalDuration)}</td></tr>`;
                     },
                     
-                    // --- TEMPLATES MODIFICADOS ---
                     membersPage: (members) => `
                         <div class="card rounded-xl shadow-lg border-0" style="background-color: var(--card-bg);">
                             <div class="p-6 border-b border-inherit flex flex-col md:flex-row justify-between items-center gap-4">
